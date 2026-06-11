@@ -2,7 +2,7 @@ FROM python:3.10
 
 RUN useradd -m -u 1000 user
 USER user
-ENV PATH="/home/user/.local/bin:\"
+ENV PATH="/home/user/.local/bin:${PATH}"
 
 WORKDIR /app
 
