@@ -11,4 +11,5 @@ RUN pip install --no-cache-dir --upgrade -r /app/requirements.txt
 
 COPY --chown=user . /app
 
+# Added a comment to force a fresh Hugging Face build trigger
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "7860"]
