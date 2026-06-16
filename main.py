@@ -1,7 +1,9 @@
+import os
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
+import anthropic
 import uvicorn
 
 app = FastAPI(title="MediBot Backend API", version="1.0.0")
@@ -45,6 +47,26 @@ NURSES = [
     {"id": 3, "name": "Rubina Akhtar", "ward": "ICU",     "shift": "Night (10PM-6AM)",   "on_duty": False},
     {"id": 4, "name": "Amna Sheikh",   "ward": "Ward 3C", "shift": "Evening (2PM-10PM)", "on_duty": False},
 ]
+
+# Role-specific Intelligent Prompts for Claude
+SYSTEM_PROMPTS = {
+    "patient": """You are MediBot, an empathetic hospital AI assistant for PATIENTS at City Hospital Pakistan. 
+Help with: general inquiries, navigating visiting hours (10AM-12PM, 5PM-7PM), and clarifying available services.
+Guidelines: Be warm, polite, and clear. Keep answers to 2-4 sentences. 
+CRITICAL: Never provide definitive medical diagnoses or prescribe medications. If symptoms sound urgent (e.g., severe chest pain, breathing difficulties), direct them immediately to the Emergency Room (Ext. 100).""",
+    
+    "doctor": """You are MediBot, a clinical workflow assistant for DOCTORS at City Hospital Pakistan. 
+Help with: standard medical terminology lookups, formatting administrative shift summaries, and providing brief, clinical updates. 
+Guidelines: Be highly professional, accurate, and concise. Respect their medical expertise.""",
+    
+    "nurse": """You are MediBot, an operational coordination assistant for NURSES at City Hospital Pakistan. 
+Help with: shift handovers, looking up ward layouts, and standard nursing checklists. 
+Guidelines: Be practical, task-focused, supportive, and efficient.""",
+    
+    "admin": """You are MediBot, an operational intelligence assistant for ADMINS at City Hospital Pakistan. 
+Help with: generating daily metrics summaries, template reports, and drafting administrative announcements.
+Guidelines: Be factual, data-driven, precise, and analytical."""
+}
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  MODELS
@@ -169,53 +191,36 @@ def overview():
         "appointment_stats":     get_stats(),
     }
 
-# ── CHAT ─────────────────────────────────────────────────────────────────────
+# ── CLAUDE AI CHAT ────────────────────────────────────────────────────────────
 
-@app.post("/chat")
-def chat(msg: ChatMessage):
-    t    = msg.message.lower()
-    role = msg.role
+@app.post("/chat/ai")
+async def ai_chat(msg: ChatMessage):
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        return {"reply": "System Error: Backend ANTHROPIC_API_KEY secret is missing. Please add it to Hugging Face settings."}
+        
+    try:
+        # Build contextual awareness regarding the hospital's live data
+        live_context = f"\n\nLive Database Context:\n"
+        live_context += f"- Active Doctors: {', '.join([d['name'] + ' (' + d['specialty'] + ')' for d in DOCTORS if d['available']])}\n"
+        live_context += f"- Current Appointments Booked Today: {len(APPOINTMENTS)}\n"
+        live_context += f"- Nurses Currently On Duty: {', '.join([n['name'] + ' (' + n['ward'] + ')' for n in NURSES if n['on_duty']])}"
 
-    if role == "patient":
-        if any(w in t for w in ["available", "doctor", "find", "cardiolog", "general", "specialist"]):
-            avail = [d["name"] + " (" + d["specialty"] + ")" for d in DOCTORS if d["available"]]
-            return {"reply": "Available doctors right now:\n\n" + "\n".join(f"✅ {a}" for a in avail) + "\n\nWould you like to book with any of them?"}
-        if any(w in t for w in ["book", "appointment", "schedule"]):
-            return {"reply": "To book an appointment, fill in the **Book Appointment** form on the right. Choose a doctor, date, and time slot, then click Confirm!"}
-        if any(w in t for w in ["visiting", "hours", "visit", "time"]):
-            return {"reply": "Visiting Hours:\n🕐 Morning: 10:00 AM – 12:00 PM\n🕐 Evening: 5:00 PM – 7:00 PM\n\nICU and pediatric wards may have different timings."}
-
-    if role == "doctor":
-        if any(w in t for w in ["schedule", "appointment", "today", "queue"]):
-            pending = [a for a in APPOINTMENTS if a["status"] in ["waiting", "in_progress", "scheduled"]]
-            return {"reply": f"You have **{len(pending)} pending appointments** today.\n\n" + "\n".join(f"• {a['patient']} at {a['time']} ({a['status']})" for a in pending)}
-        if any(w in t for w in ["lab", "result", "test"]):
-            return {"reply": "Pending lab results:\n🧪 Ahmed Raza — Blood panel (since yesterday)\n🧪 Nadia Iqbal — CBC results (urgent)\n\nShall I notify the lab to expedite?"}
-
-    if role == "nurse":
-        if any(w in t for w in ["shift", "duty", "ward", "next"]):
-            on = [n for n in NURSES if n["on_duty"]]
-            return {"reply": "Currently on duty:\n\n" + "\n".join(f"• {n['name']} — {n['ward']} ({n['shift']})" for n in on)}
-        if any(w in t for w in ["task", "checklist", "todo"]):
-            return {"reply": "Your pending tasks:\n☐ Administer medication — Room 6A-1 (by 12 PM)\n☐ Vitals check — Rooms 5, 6, 7\n☐ Prepare Room 8 for new admission\n✅ Morning rounds — Done"}
-        if any(w in t for w in ["on-call", "on call", "oncall", "doctor"]):
-            return {"reply": "On-call doctor right now:\n👨‍⚕️ Dr. Bilal Akhtar — General Surgery\n📞 Ext: 2234\n\nFor emergencies also page the ICU attending."}
-
-    if role == "admin":
-        if any(w in t for w in ["summary", "report", "stats", "today", "overview"]):
-            s = get_stats()
-            return {"reply": f"Today's Summary:\n📊 Total: {s['total']} | ✅ Done: {s['completed']} | 🕐 Waiting: {s['waiting']} | 📅 Scheduled: {s['scheduled']}\n\nDoctors on duty: {len([d for d in DOCTORS if d['available']])} | Nurses active: {len([n for n in NURSES if n['on_duty']])}"}
-        if any(w in t for w in ["unavailable", "mark", "toggle"]):
-            return {"reply": "To mark a doctor unavailable, scroll down to **Doctor Availability Control** and click the green button next to their name. Changes save to the backend instantly!"}
-
-    fallbacks = [
-        "I can help with appointments, doctor availability, schedules, and more. What do you need?",
-        "For urgent matters, please contact the front desk at ext. 100.",
-        "Could you provide more detail? I want to make sure I give you the right information.",
-    ]
-    import random
-    return {"reply": random.choice(fallbacks)}
-
+        client = anthropic.Anthropic(api_key=api_key)
+        system_context = SYSTEM_PROMPTS.get(msg.role.lower(), SYSTEM_PROMPTS["patient"]) + live_context
+        
+        message = client.messages.create(
+            model="claude-3-5-sonnet-20240620",
+            max_tokens=400,
+            temperature=0.5,
+            system=system_context,
+            messages=[
+                {"role": "user", "content": msg.message}
+            ]
+        )
+        return {"reply": message.content[0].text}
+    except Exception as e:
+        return {"reply": f"I am experiencing difficulty rendering a response right now. (Error: {str(e)})"}
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=7860, reload=True)
