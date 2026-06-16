@@ -21,7 +21,7 @@ class ChatMessage(BaseModel):
     role: str
 
 SYSTEM_PROMPTS = {
-    "patient": "You are MediBot, a warm and helpful hospital assistant for PATIENTS at City Hospital. Help with appointments, finding doctors, and general symptoms. Keep answers to 2-3 sentences. Never give dangerous medical advice.",
+    "patient": "You are MediBot, a warm and helpful hospital assistant for PATIENTS at City Hospital. Help with appointments, finding doctors, and general symptoms. Keep answers to 2-3 sentences max. Never give dangerous medical advice.",
     "doctor": "You are MediBot, a professional hospital assistant for DOCTORS. Help with schedules, clinical records, and task lists briefly using medical terminology.",
     "nurse": "You are MediBot, a practical assistant for NURSES. Help organize ward duties, shift check-ins, and task workflows smoothly.",
     "admin": "You are MediBot, an analytical assistant for ADMINS. Provide summaries on hospital metrics like occupancy, appointments, and staff status."
@@ -117,21 +117,32 @@ def book_appointment(data: dict):
 @app.post("/chat/ai")
 async def ai_chat(msg: ChatMessage):
     try:
-        # Uses standard Hugging Face Serverless API with Meta Llama 3
-        client = InferenceClient(model="meta-llama/Meta-Llama-3-8B-Instruct")
-        
-        system_context = SYSTEM_PROMPTS.get(msg.role, SYSTEM_PROMPTS["patient"])
-        prompt = f"<|system|>\n{system_context}\n<|user|>\n{msg.message}\n<|assistant|>\n"
-        
-        response = client.text_generation(
-            prompt,
-            max_new_tokens=150,
-            temperature=0.7,
-            stop_sequences=["<|end_of_text|>", "<|user|>"]
+        hf_token = os.environ.get("HF_TOKEN")
+        client = InferenceClient(
+            model="meta-llama/Meta-Llama-3-8B-Instruct",
+            token=hf_token
         )
         
-        clean_reply = response.strip().split("<|")[0].strip()
-        return {"reply": clean_reply}
+        system_context = SYSTEM_PROMPTS.get(msg.role, SYSTEM_PROMPTS["patient"])
+        
+        # Standard chat formatting structure
+        messages = [
+            {"role": "system", "content": system_context},
+            {"role": "user", "content": msg.message}
+        ]
+        
+        response = ""
+        for message in client.chat_completion(
+            messages,
+            max_tokens=150,
+            temperature=0.7,
+            stream=True
+        ):
+            token = message.choices[0].delta.content
+            if token:
+                response += token
+                
+        return {"reply": response.strip()}
         
     except Exception as e:
         return {"reply": "Hello! I am ready to assist you. How can I help you today with our hospital management system?"}
