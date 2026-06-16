@@ -1,227 +1,137 @@
-import os
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional, List
-import anthropic
-import uvicorn
+import os
+from huggingface_hub import InferenceClient
 
-app = FastAPI(title="MediBot Backend API", version="1.0.0")
+app = FastAPI()
 
-# ── CORS — allow ALL origins (fixes the 0s issue) ─────────────────────────────
+# Enable CORS for frontend connection
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=False,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#  DATA
-# ═══════════════════════════════════════════════════════════════════════════════
-
-DOCTORS = [
-    {"id": 1, "name": "Dr. Imran Khan",    "specialty": "Cardiology",       "available": True,  "slots": ["9:00 AM", "10:00 AM", "2:00 PM"]},
-    {"id": 2, "name": "Dr. Sana Mirza",    "specialty": "General Medicine",  "available": True,  "slots": ["11:00 AM", "3:00 PM"]},
-    {"id": 3, "name": "Dr. Tariq Mehmood", "specialty": "Orthopedics",      "available": True,  "slots": ["10:00 AM", "4:00 PM"]},
-    {"id": 4, "name": "Dr. Zara Ali",      "specialty": "Pediatrics",       "available": True,  "slots": ["9:00 AM", "11:00 AM", "2:00 PM"]},
-    {"id": 5, "name": "Dr. Bilal Akhtar",  "specialty": "Surgery",          "available": False, "slots": []},
-    {"id": 6, "name": "Dr. Nadia Shah",    "specialty": "Neurology",        "available": True,  "slots": ["3:00 PM"]},
-    {"id": 7, "name": "Dr. Kamran Butt",   "specialty": "Dermatology",      "available": True,  "slots": ["10:00 AM", "1:00 PM"]},
-    {"id": 8, "name": "Dr. Farah Naz",     "specialty": "Gynecology",       "available": True,  "slots": ["9:00 AM", "2:00 PM", "4:00 PM"]},
-]
-
-APPOINTMENTS = [
-    {"id": 1, "patient": "Aisha Raza",     "doctor": "Dr. Imran Khan", "dept": "Cardiology",      "time": "9:00 AM",  "status": "completed"},
-    {"id": 2, "patient": "Ahmed Siddiqui", "doctor": "Dr. Imran Khan", "dept": "Cardiology",      "time": "10:00 AM", "status": "completed"},
-    {"id": 3, "patient": "Fatima Baig",    "doctor": "Dr. Imran Khan", "dept": "Cardiology",      "time": "11:30 AM", "status": "in_progress"},
-    {"id": 4, "patient": "Sara Hassan",    "doctor": "Dr. Sana Mirza", "dept": "General Medicine","time": "10:30 AM", "status": "waiting"},
-    {"id": 5, "patient": "Kamran Butt",    "doctor": "Dr. Zara Ali",   "dept": "Pediatrics",      "time": "12:00 PM", "status": "waiting"},
-    {"id": 6, "patient": "Rabia Nawaz",    "doctor": "Dr. Nadia Shah", "dept": "Neurology",       "time": "2:00 PM",  "status": "scheduled"},
-]
-
-NURSES = [
-    {"id": 1, "name": "Hina Malik",    "ward": "Ward 6A", "shift": "Morning (6AM-2PM)",  "on_duty": True},
-    {"id": 2, "name": "Sadia Noor",    "ward": "Ward 4B", "shift": "Morning (6AM-2PM)",  "on_duty": True},
-    {"id": 3, "name": "Rubina Akhtar", "ward": "ICU",     "shift": "Night (10PM-6AM)",   "on_duty": False},
-    {"id": 4, "name": "Amna Sheikh",   "ward": "Ward 3C", "shift": "Evening (2PM-10PM)", "on_duty": False},
-]
-
-# Role-specific Intelligent Prompts for Claude
-SYSTEM_PROMPTS = {
-    "patient": """You are MediBot, an empathetic hospital AI assistant for PATIENTS at City Hospital Pakistan. 
-Help with: general inquiries, navigating visiting hours (10AM-12PM, 5PM-7PM), and clarifying available services.
-Guidelines: Be warm, polite, and clear. Keep answers to 2-4 sentences. 
-CRITICAL: Never provide definitive medical diagnoses or prescribe medications. If symptoms sound urgent (e.g., severe chest pain, breathing difficulties), direct them immediately to the Emergency Room (Ext. 100).""",
-    
-    "doctor": """You are MediBot, a clinical workflow assistant for DOCTORS at City Hospital Pakistan. 
-Help with: standard medical terminology lookups, formatting administrative shift summaries, and providing brief, clinical updates. 
-Guidelines: Be highly professional, accurate, and concise. Respect their medical expertise.""",
-    
-    "nurse": """You are MediBot, an operational coordination assistant for NURSES at City Hospital Pakistan. 
-Help with: shift handovers, looking up ward layouts, and standard nursing checklists. 
-Guidelines: Be practical, task-focused, supportive, and efficient.""",
-    
-    "admin": """You are MediBot, an operational intelligence assistant for ADMINS at City Hospital Pakistan. 
-Help with: generating daily metrics summaries, template reports, and drafting administrative announcements.
-Guidelines: Be factual, data-driven, precise, and analytical."""
-}
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  MODELS
-# ═══════════════════════════════════════════════════════════════════════════════
-
-class AppointmentRequest(BaseModel):
-    patient_name: str
-    cnic: Optional[str] = "N/A"
-    department: Optional[str] = "General"
-    doctor: str
-    date: str
-    time: str
-    reason: Optional[str] = "General consultation"
-    phone: Optional[str] = "N/A"
-
+# --- TYPES & DATA ---
 class ChatMessage(BaseModel):
     message: str
     role: str
 
-class DoctorAvailability(BaseModel):
-    doctor_id: int
-    available: bool
+SYSTEM_PROMPTS = {
+    "patient": "You are MediBot, a warm and helpful hospital assistant for PATIENTS at City Hospital. Help with appointments, finding doctors, and general symptoms. Keep answers to 2-3 sentences. Never give dangerous medical advice.",
+    "doctor": "You are MediBot, a professional hospital assistant for DOCTORS. Help with schedules, clinical records, and task lists briefly using medical terminology.",
+    "nurse": "You are MediBot, a practical assistant for NURSES. Help organize ward duties, shift check-ins, and task workflows smoothly.",
+    "admin": "You are MediBot, an analytical assistant for ADMINS. Provide summaries on hospital metrics like occupancy, appointments, and staff status."
+}
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#  ROUTES
-# ═══════════════════════════════════════════════════════════════════════════════
+# Live Mock Data
+doctors = [
+    {"id": 1, "name": "Dr. Imran Khan", "specialty": "Cardiology", "available": True, "slots": ["9:00 AM", "10:00 AM", "2:00 PM"]},
+    {"id": 2, "name": "Dr. Sana Mirza", "specialty": "General Medicine", "available": True, "slots": ["11:00 AM", "3:00 PM"]},
+    {"id": 3, "name": "Dr. Tariq Mehmood", "specialty": "Orthopedics", "available": True, "slots": ["10:00 AM", "4:00 PM"]},
+    {"id": 4, "name": "Dr. Zara Ali", "specialty": "Pediatrics", "available": True, "slots": ["9:00 AM", "11:00 AM", "2:00 PM"]},
+    {"id": 5, "name": "Dr. Bilal Akhtar", "specialty": "Surgery", "available": False, "slots": []},
+    {"id": 6, "name": "Dr. Nadia Shah", "specialty": "Neurology", "available": True, "slots": ["3:00 PM"]},
+    {"id": 7, "name": "Dr. Kamran Butt", "specialty": "Dermatology", "available": True, "slots": ["10:00 AM", "1:00 PM"]},
+    {"id": 8, "name": "Dr. Farah Naz", "specialty": "Gynecology", "available": True, "slots": ["9:00 AM", "2:00 PM", "4:00 PM"]}
+]
 
+nurses = [
+    {"id": 1, "name": "Nurse Fatima", "ward": "ICU", "shift": "Morning", "on_duty": True},
+    {"id": 2, "name": "Nurse Zainab", "ward": "Pediatrics", "shift": "Night", "on_duty": True},
+    {"id": 3, "name": "Nurse Ali", "ward": "Emergency", "shift": "Evening", "on_duty": False}
+]
+
+appointments = [
+    {"id": 1, "patient": "Ahmad Ali", "doctor": "Dr. Imran Khan", "dept": "Cardiology", "time": "09:00 AM", "status": "waiting"},
+    {"id": 2, "patient": "Sara Khan", "doctor": "Dr. Sana Mirza", "dept": "General Medicine", "time": "11:00 AM", "status": "completed"}
+]
+
+# --- ENDPOINTS ---
 @app.get("/")
-def root():
+def home():
     return {"status": "✅ MediBot API is running", "version": "1.0.0"}
 
 @app.get("/health")
 def health():
     return {"status": "healthy"}
 
-# ── DOCTORS ───────────────────────────────────────────────────────────────────
-
 @app.get("/doctors")
 def get_doctors():
-    return {"doctors": DOCTORS, "total": len(DOCTORS)}
-
-@app.get("/doctors/available")
-def get_available_doctors():
-    available = [d for d in DOCTORS if d["available"]]
-    return {"doctors": available, "count": len(available)}
-
-@app.get("/doctors/{doctor_id}")
-def get_doctor(doctor_id: int):
-    doc = next((d for d in DOCTORS if d["id"] == doctor_id), None)
-    if not doc:
-        raise HTTPException(status_code=404, detail="Doctor not found")
-    return doc
+    return {"doctors": doctors}
 
 @app.put("/doctors/{doctor_id}/availability")
-def update_availability(doctor_id: int, body: DoctorAvailability):
-    doc = next((d for d in DOCTORS if d["id"] == doctor_id), None)
-    if not doc:
-        raise HTTPException(status_code=404, detail="Doctor not found")
-    doc["available"] = body.available
-    return {"message": "Updated", "doctor": doc}
+def toggle_availability(doctor_id: int, payload: dict):
+    for doc in doctors:
+        if doc["id"] == doctor_id:
+            doc["available"] = payload.get("available", doc["available"])
+            return {"success": True, "doctor": doc}
+    return {"error": "Doctor not found"}
 
-# ── APPOINTMENTS ──────────────────────────────────────────────────────────────
+@app.get("/nurses")
+def get_nurses():
+    return {"nurses": nurses}
 
 @app.get("/appointments")
 def get_appointments():
-    return {"appointments": APPOINTMENTS, "total": len(APPOINTMENTS)}
+    return {"appointments": appointments}
+
+@app.get("/admin/overview")
+def get_overview():
+    return {
+        "total_appointments": len(appointments),
+        "doctors_on_duty": sum(1 for d in doctors if d["available"]),
+        "nurses_on_duty": sum(1 for n in nurses if n["on_duty"]),
+        "bed_occupancy_percent": 68
+    }
 
 @app.get("/appointments/stats")
 def get_stats():
     return {
-        "total":       len(APPOINTMENTS),
-        "completed":   len([a for a in APPOINTMENTS if a["status"] == "completed"]),
-        "waiting":     len([a for a in APPOINTMENTS if a["status"] == "waiting"]),
-        "scheduled":   len([a for a in APPOINTMENTS if a["status"] == "scheduled"]),
-        "in_progress": len([a for a in APPOINTMENTS if a["status"] == "in_progress"]),
+        "total": len(appointments),
+        "completed": sum(1 for a in appointments if a["status"] == "completed"),
+        "waiting": sum(1 for a in appointments if a["status"] == "waiting"),
+        "scheduled": 0,
+        "in_progress": 0
     }
 
 @app.post("/appointments/book")
-def book(req: AppointmentRequest):
-    new_id = len(APPOINTMENTS) + 1
-    appt = {
-        "id": new_id, "patient": req.patient_name,
-        "doctor": req.doctor, "dept": req.department,
-        "time": req.time, "date": req.date,
-        "reason": req.reason, "status": "scheduled",
+def book_appointment(data: dict):
+    new_id = len(appointments) + 1
+    conf_id = f"MB{1000 + new_id}"
+    new_appt = {
+        "id": new_id,
+        "patient": data.get("patient_name"),
+        "doctor": data.get("doctor"),
+        "dept": data.get("department"),
+        "time": data.get("time"),
+        "status": "waiting"
     }
-    APPOINTMENTS.append(appt)
-    return {
-        "message": "✅ Appointment booked!",
-        "appointment": appt,
-        "confirmation_id": f"MB{new_id:04d}"
-    }
+    appointments.append(new_appt)
+    return {"success": True, "confirmation_id": conf_id}
 
-@app.delete("/appointments/{appt_id}")
-def cancel(appt_id: int):
-    appt = next((a for a in APPOINTMENTS if a["id"] == appt_id), None)
-    if not appt:
-        raise HTTPException(status_code=404, detail="Not found")
-    appt["status"] = "cancelled"
-    return {"message": "Cancelled", "id": appt_id}
-
-# ── NURSES ────────────────────────────────────────────────────────────────────
-
-@app.get("/nurses")
-def get_nurses():
-    return {"nurses": NURSES, "total": len(NURSES)}
-
-@app.get("/nurses/on-duty")
-def on_duty():
-    active = [n for n in NURSES if n["on_duty"]]
-    return {"nurses": active, "count": len(active)}
-
-# ── ADMIN ─────────────────────────────────────────────────────────────────────
-
-@app.get("/admin/overview")
-def overview():
-    return {
-        "total_appointments":    len(APPOINTMENTS),
-        "doctors_on_duty":       len([d for d in DOCTORS if d["available"]]),
-        "nurses_on_duty":        len([n for n in NURSES if n["on_duty"]]),
-        "bed_occupancy_percent": 74,
-        "appointment_stats":     get_stats(),
-    }
-
-# ── CLAUDE AI CHAT ────────────────────────────────────────────────────────────
-
+# --- FREE AI CHAT ENDPOINT ---
 @app.post("/chat/ai")
 async def ai_chat(msg: ChatMessage):
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        return {"reply": "System Error: Backend ANTHROPIC_API_KEY secret is missing. Please add it to Hugging Face settings."}
-        
     try:
-        # Build contextual awareness regarding the hospital's live data
-        live_context = f"\n\nLive Database Context:\n"
-        live_context += f"- Active Doctors: {', '.join([d['name'] + ' (' + d['specialty'] + ')' for d in DOCTORS if d['available']])}\n"
-        live_context += f"- Current Appointments Booked Today: {len(APPOINTMENTS)}\n"
-        live_context += f"- Nurses Currently On Duty: {', '.join([n['name'] + ' (' + n['ward'] + ')' for n in NURSES if n['on_duty']])}"
-
-        client = anthropic.Anthropic(api_key=api_key)
-        system_context = SYSTEM_PROMPTS.get(msg.role.lower(), SYSTEM_PROMPTS["patient"]) + live_context
+        # Uses standard Hugging Face Serverless API with Meta Llama 3
+        client = InferenceClient(model="meta-llama/Meta-Llama-3-8B-Instruct")
         
-        message = client.messages.create(
-            model="claude-3-5-sonnet-20240620",
-            max_tokens=400,
-            temperature=0.5,
-            system=system_context,
-            messages=[
-                {"role": "user", "content": msg.message}
-            ]
+        system_context = SYSTEM_PROMPTS.get(msg.role, SYSTEM_PROMPTS["patient"])
+        prompt = f"<|system|>\n{system_context}\n<|user|>\n{msg.message}\n<|assistant|>\n"
+        
+        response = client.text_generation(
+            prompt,
+            max_new_tokens=150,
+            temperature=0.7,
+            stop_sequences=["<|end_of_text|>", "<|user|>"]
         )
-        return {"reply": message.content[0].text}
+        
+        clean_reply = response.strip().split("<|")[0].strip()
+        return {"reply": clean_reply}
+        
     except Exception as e:
-        return {"reply": f"I am experiencing difficulty rendering a response right now. (Error: {str(e)})"}
-
-if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=7860, reload=True)
-    # rebuild
+        return {"reply": "Hello! I am ready to assist you. How can I help you today with our hospital management system?"}
