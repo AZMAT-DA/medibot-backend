@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import os
-from huggingface_hub import InferenceClient
+import requests
 
 app = FastAPI()
 
@@ -57,15 +57,6 @@ appointments = [
     {"id": 1, "patient": "Ahmad Ali", "doctor": "Dr. Imran Khan", "dept": "Cardiology", "time": "09:00 AM", "status": "waiting"},
     {"id": 2, "patient": "Sara Khan", "doctor": "Dr. Sana Mirza", "dept": "General Medicine", "time": "11:00 AM", "status": "completed"}
 ]
-
-# --- SAFE CLIENT INITIALIZATION ---
-HF_TOKEN = os.environ.get("HF_TOKEN")
-
-# Explicit URL fallback initialization to fix NameResolutionError inside isolated containers
-client = InferenceClient(
-    model="https://api-inference.huggingface.co/models/meta-llama/Meta-Llama-3-8B-Instruct",
-    token=HF_TOKEN
-)
 
 # --- ENDPOINTS ---
 @app.get("/")
@@ -128,30 +119,44 @@ async def ai_chat(msg: ChatMessage):
         role_key = msg.role.lower() if msg.role else "patient"
         system_context = SYSTEM_PROMPTS.get(role_key, SYSTEM_PROMPTS["patient"])
         
-        # Inject real-time backend data into the AI context for factual accuracy
+        # Inject live real-time dashboard data for intelligent responses
         if role_key == "patient":
             available_docs = [f"{d['name']} ({d['specialty']})" for d in doctors if d["available"]]
             system_context += f" Current live available doctors at City Hospital right now: {', '.join(available_docs)}."
         elif role_key == "admin":
             system_context += f" Current Stats: Total appointments: {len(appointments)}, Bed Occupancy: 68%."
 
-        # Payload structure expected by LLama-3 chat format
-        messages = [
-            {"role": "system", "content": system_context},
-            {"role": "user", "content": msg.message}
-        ]
+        # Format the strict text prompt structure for Meta-Llama-3-8B-Instruct
+        formatted_prompt = f"<|system|>\n{system_context}\n<|user|>\n{msg.message}\n<|assistant|>\n"
         
-        # Execute synchronous request to handle the JSON generation cleanly without stream mismatches
-        completion = client.chat_completion(
-            messages=messages,
-            max_tokens=200,
-            temperature=0.6,
-            stream=False
-        )
+        payload = {
+            "inputs": formatted_prompt,
+            "parameters": {
+                "max_new_tokens": 150,
+                "temperature": 0.6,
+                "return_full_text": False
+            }
+        }
         
-        response_text = completion.choices[0].message.content
-        return {"reply": response_text.strip()}
+        # Direct API Routing
+        API_URL = "https://api-inference.huggingface.co/models/meta-llama/Meta-Llama-3-8B-Instruct"
+        headers = {"Authorization": f"Bearer {os.environ.get('HF_TOKEN')}"}
         
+        # Make a standard synchronous HTTP request
+        response = requests.post(API_URL, headers=headers, json=payload, timeout=12)
+        result = response.json()
+        
+        # Handle and parse the standard Hugging Face pipeline output array
+        if isinstance(result, list) and len(result) > 0:
+            reply = result[0].get("generated_text", "").strip()
+            return {"reply": reply}
+        elif isinstance(result, dict) and "generated_text" in result:
+            return {"reply": result["generated_text"].strip()}
+        elif isinstance(result, dict) and "error" in result:
+            return {"reply": f"Model Notice: {result['error']}"}
+        else:
+            return {"reply": "Hello! I am ready to assist you. How can I help you today with our hospital management system?"}
+            
     except Exception as e:
-        # Returns the error directly to your frontend UI text window for quick adjustments
+        # Returns clear error messages directly into your frontend chat window if something misbehaves
         return {"reply": f"System Alert: Chat processing error occurred. Details: {str(e)}"}
