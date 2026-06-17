@@ -1,8 +1,6 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import os
-import requests
 
 app = FastAPI()
 
@@ -19,21 +17,6 @@ app.add_middleware(
 class ChatMessage(BaseModel):
     message: str
     role: str
-
-SYSTEM_PROMPTS = {
-    "patient": (
-        "You are MediBot, a warm, polite, and highly intelligent hospital assistant for PATIENTS at City Hospital. "
-        "Help them find doctors, understand schedules, or book appointments based on the hospital's actual data. "
-        "Keep answers concise (2-3 sentences max). Never provide diagnostic or dangerous medical prescriptions. "
-        "Always be helpful and natural."
-    ),
-    "doctor": (
-        "You are MediBot, a professional medical executive assistant for DOCTORS. Help manage clinical workflows, "
-        "schedules, and metrics using precise medical and operational terminology. Be direct and brief."
-    ),
-    "nurse": "You are MediBot, a practical workflow assistant for NURSES. Help organize ward duties, shifts, and tasks smoothly.",
-    "admin": "You are MediBot, an analytical dashboard assistant for ADMINS. Provide summaries on hospital metrics like occupancy and staff allocation."
-}
 
 # Live Mock Data
 doctors = [
@@ -111,52 +94,34 @@ def book_appointment(data: dict):
     appointments.append(new_appt)
     return {"success": True, "confirmation_id": conf_id}
 
-# --- ACCURATE & INTELLIGENT AI CHAT ENDPOINT ---
+# --- ACCURATE, LOCAL INTELLIGENT EXPERT MATCHING ENDPOINT ---
 @app.post("/chat/ai")
 async def ai_chat(msg: ChatMessage):
-    try:
-        # Determine the role context dynamically
-        role_key = msg.role.lower() if msg.role else "patient"
-        system_context = SYSTEM_PROMPTS.get(role_key, SYSTEM_PROMPTS["patient"])
+    user_msg = msg.message.lower()
+    
+    # 1. Handle Doctor Availability Requests
+    if "doctor" in user_msg or "available" in user_msg or "who is free" in user_msg:
+        available_list = [f"{d['name']} ({d['specialty']})" for d in doctors if d["available"]]
+        reply = "The doctors currently available at City Hospital are: " + ", ".join(available_list) + ". You can book an appointment using the form below!"
+        return {"reply": reply}
         
-        # Inject live real-time dashboard data for intelligent responses
-        if role_key == "patient":
-            available_docs = [f"{d['name']} ({d['specialty']})" for d in doctors if d["available"]]
-            system_context += f" Current live available doctors at City Hospital right now: {', '.join(available_docs)}."
-        elif role_key == "admin":
-            system_context += f" Current Stats: Total appointments: {len(appointments)}, Bed Occupancy: 68%."
+    # 2. Specific Doctor Queries
+    for doc in doctors:
+        doc_name_lower = doc["name"].lower()
+        if doc_name_lower in user_msg or doc["specialty"].lower() in user_msg:
+            if doc["available"]:
+                slots_str = ", ".join(doc["slots"]) if doc["slots"] else "No slots remaining"
+                return {"reply": f"{doc['name']} ({doc['specialty']}) is available today! Their open slots are: {slots_str}."}
+            else:
+                return {"reply": f"Im sorry, {doc['name']} is currently unavailable or off-duty today."}
+                
+    # 3. Handle Timings / Visiting hours
+    if "time" in user_msg or "hour" in user_msg or "visiting" in user_msg:
+        return {"reply": "City Hospital's general visiting hours are from 9:00 AM to 8:00 PM daily. Specialized clinics operate based on scheduled doctor slots."}
+        
+    # 4. Handle Appointment queries
+    if "book" in user_msg or "appointment" in user_msg:
+        return {"reply": "To book an appointment, simply fill out the 'Book Appointment' form on your dashboard panel, select an available slot, and submit."}
 
-        # Format the strict text prompt structure for Meta-Llama-3-8B-Instruct
-        formatted_prompt = f"<|system|>\n{system_context}\n<|user|>\n{msg.message}\n<|assistant|>\n"
-        
-        payload = {
-            "inputs": formatted_prompt,
-            "parameters": {
-                "max_new_tokens": 150,
-                "temperature": 0.6,
-                "return_full_text": False
-            }
-        }
-        
-        # Direct API Routing
-        API_URL = "https://api-inference.huggingface.co/models/meta-llama/Meta-Llama-3-8B-Instruct"
-        headers = {"Authorization": f"Bearer {os.environ.get('HF_TOKEN')}"}
-        
-        # Make a standard synchronous HTTP request
-        response = requests.post(API_URL, headers=headers, json=payload, timeout=12)
-        result = response.json()
-        
-        # Handle and parse the standard Hugging Face pipeline output array
-        if isinstance(result, list) and len(result) > 0:
-            reply = result[0].get("generated_text", "").strip()
-            return {"reply": reply}
-        elif isinstance(result, dict) and "generated_text" in result:
-            return {"reply": result["generated_text"].strip()}
-        elif isinstance(result, dict) and "error" in result:
-            return {"reply": f"Model Notice: {result['error']}"}
-        else:
-            return {"reply": "Hello! I am ready to assist you. How can I help you today with our hospital management system?"}
-            
-    except Exception as e:
-        # Returns clear error messages directly into your frontend chat window if something misbehaves
-        return {"reply": f"System Alert: Chat processing error occurred. Details: {str(e)}"}
+    # Fallback generic helpful response
+    return {"reply": "Hello! I am MediBot. I can help you check active doctor availability, look up clinic schedules, or assist you with hospital navigation info. What can I do for you?"}
