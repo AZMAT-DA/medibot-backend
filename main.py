@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import os
@@ -21,10 +21,18 @@ class ChatMessage(BaseModel):
     role: str
 
 SYSTEM_PROMPTS = {
-    "patient": "You are MediBot, a warm and helpful hospital assistant for PATIENTS at City Hospital. Help with appointments, finding doctors, and general symptoms. Keep answers to 2-3 sentences max. Never give dangerous medical advice.",
-    "doctor": "You are MediBot, a professional hospital assistant for DOCTORS. Help with schedules, clinical records, and task lists briefly using medical terminology.",
-    "nurse": "You are MediBot, a practical assistant for NURSES. Help organize ward duties, shift check-ins, and task workflows smoothly.",
-    "admin": "You are MediBot, an analytical assistant for ADMINS. Provide summaries on hospital metrics like occupancy, appointments, and staff status."
+    "patient": (
+        "You are MediBot, a warm, polite, and highly intelligent hospital assistant for PATIENTS at City Hospital. "
+        "Help them find doctors, understand schedules, or book appointments based on the hospital's actual data. "
+        "Keep answers concise (2-3 sentences max). Never provide diagnostic or dangerous medical prescriptions. "
+        "Always be helpful and natural."
+    ),
+    "doctor": (
+        "You are MediBot, a professional medical executive assistant for DOCTORS. Help manage clinical workflows, "
+        "schedules, and metrics using precise medical and operational terminology. Be direct and brief."
+    ),
+    "nurse": "You are MediBot, a practical workflow assistant for NURSES. Help organize ward duties, shifts, and tasks smoothly.",
+    "admin": "You are MediBot, an analytical dashboard assistant for ADMINS. Provide summaries on hospital metrics like occupancy and staff allocation."
 }
 
 # Live Mock Data
@@ -49,6 +57,15 @@ appointments = [
     {"id": 1, "patient": "Ahmad Ali", "doctor": "Dr. Imran Khan", "dept": "Cardiology", "time": "09:00 AM", "status": "waiting"},
     {"id": 2, "patient": "Sara Khan", "doctor": "Dr. Sana Mirza", "dept": "General Medicine", "time": "11:00 AM", "status": "completed"}
 ]
+
+# --- SAFE CLIENT INITIALIZATION ---
+HF_TOKEN = os.environ.get("HF_TOKEN")
+
+# Explicit URL fallback initialization to fix NameResolutionError inside isolated containers
+client = InferenceClient(
+    model="https://api-inference.huggingface.co/models/meta-llama/Meta-Llama-3-8B-Instruct",
+    token=HF_TOKEN
+)
 
 # --- ENDPOINTS ---
 @app.get("/")
@@ -88,16 +105,6 @@ def get_overview():
         "bed_occupancy_percent": 68
     }
 
-@app.get("/appointments/stats")
-def get_stats():
-    return {
-        "total": len(appointments),
-        "completed": sum(1 for a in appointments if a["status"] == "completed"),
-        "waiting": sum(1 for a in appointments if a["status"] == "waiting"),
-        "scheduled": 0,
-        "in_progress": 0
-    }
-
 @app.post("/appointments/book")
 def book_appointment(data: dict):
     new_id = len(appointments) + 1
@@ -113,36 +120,38 @@ def book_appointment(data: dict):
     appointments.append(new_appt)
     return {"success": True, "confirmation_id": conf_id}
 
-# --- FREE AI CHAT ENDPOINT ---
+# --- ACCURATE & INTELLIGENT AI CHAT ENDPOINT ---
 @app.post("/chat/ai")
 async def ai_chat(msg: ChatMessage):
     try:
-        hf_token = os.environ.get("HF_TOKEN")
-        client = InferenceClient(
-            model="meta-llama/Meta-Llama-3-8B-Instruct",
-            token=hf_token
-        )
+        # Determine the role context dynamically
+        role_key = msg.role.lower() if msg.role else "patient"
+        system_context = SYSTEM_PROMPTS.get(role_key, SYSTEM_PROMPTS["patient"])
         
-        system_context = SYSTEM_PROMPTS.get(msg.role, SYSTEM_PROMPTS["patient"])
-        
-        # Standard chat formatting structure
+        # Inject real-time backend data into the AI context for factual accuracy
+        if role_key == "patient":
+            available_docs = [f"{d['name']} ({d['specialty']})" for d in doctors if d["available"]]
+            system_context += f" Current live available doctors at City Hospital right now: {', '.join(available_docs)}."
+        elif role_key == "admin":
+            system_context += f" Current Stats: Total appointments: {len(appointments)}, Bed Occupancy: 68%."
+
+        # Payload structure expected by LLama-3 chat format
         messages = [
             {"role": "system", "content": system_context},
             {"role": "user", "content": msg.message}
         ]
         
-        response = ""
-        for message in client.chat_completion(
-            messages,
-            max_tokens=150,
-            temperature=0.7,
-            stream=True
-        ):
-            token = message.choices[0].delta.content
-            if token:
-                response += token
-                
-        return {"reply": response.strip()}
+        # Execute synchronous request to handle the JSON generation cleanly without stream mismatches
+        completion = client.chat_completion(
+            messages=messages,
+            max_tokens=200,
+            temperature=0.6,
+            stream=False
+        )
+        
+        response_text = completion.choices[0].message.content
+        return {"reply": response_text.strip()}
         
     except Exception as e:
-        return {"reply": "Hello! I am ready to assist you. How can I help you today with our hospital management system?"}
+        # Returns the error directly to your frontend UI text window for quick adjustments
+        return {"reply": f"System Alert: Chat processing error occurred. Details: {str(e)}"}
